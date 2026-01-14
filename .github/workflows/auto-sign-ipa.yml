@@ -1,0 +1,157 @@
+name: Auto Sign IPA (AltStore Ready)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_file:
+        description: 'IPA file name'
+        required: false
+        default: 'swiggy_with_reset_button.ipa'
+  push:
+    branches:
+      - main
+    paths:
+      - '*.ipa'
+      - '.github/workflows/auto-sign-ipa.yml'
+
+jobs:
+  prepare-ipa:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Find IPA file
+        id: find_ipa
+        run: |
+          IPA_FILE="${{ github.event.inputs.ipa_file || 'swiggy_with_reset_button.ipa' }}"
+          if [ ! -f "$IPA_FILE" ]; then
+            IPA_FILE=$(find . -name "*.ipa" -type f -not -path "./releases/*" | head -1)
+          fi
+          
+          if [ -z "$IPA_FILE" ] || [ ! -f "$IPA_FILE" ]; then
+            echo "Error: No IPA file found"
+            exit 1
+          fi
+          
+          echo "ipa_file=$IPA_FILE" >> $GITHUB_OUTPUT
+          echo "Found IPA: $IPA_FILE"
+      
+      - name: Create releases directory
+        run: |
+          mkdir -p releases
+          echo "Releases directory: releases/"
+      
+      - name: Prepare IPA for AltStore
+        run: |
+          IPA_FILE="${{ steps.find_ipa.outputs.ipa_file }}"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          OUTPUT_IPA="releases/swiggy_altstore_ready_${TIMESTAMP}.ipa"
+          
+          echo "Preparing IPA: $IPA_FILE"
+          echo "Output: $OUTPUT_IPA"
+          
+          # Extract
+          TEMP_DIR="temp_altstore_$$"
+          mkdir -p "$TEMP_DIR"
+          unzip -q "$IPA_FILE" -d "$TEMP_DIR"
+          
+          # Find app bundle
+          APP_BUNDLE=$(find "$TEMP_DIR" -name "*.app" -type d | head -1)
+          
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "Error: App bundle not found"
+            exit 1
+          fi
+          
+          echo "App bundle: $(basename "$APP_BUNDLE")"
+          
+          # Clean signatures (AltStore will sign)
+          find "$APP_BUNDLE" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "$APP_BUNDLE" -name "*.mobileprovision" -delete 2>/dev/null || true
+          
+          # Repackage
+          cd "$TEMP_DIR"
+          zip -q -r "../$OUTPUT_IPA" Payload/
+          cd ..
+          
+          rm -rf "$TEMP_DIR"
+          
+          echo "output_ipa=$OUTPUT_IPA" >> $GITHUB_ENV
+          echo "✅ IPA prepared: $OUTPUT_IPA"
+      
+      - name: Create README
+        run: |
+          cat > releases/README.md << 'EOF'
+          # IPA Releases
+          
+          This folder contains prepared IPAs ready for installation.
+          
+          ## 📁 Location
+          
+          All IPAs are stored in: **`releases/`** folder
+          
+          ## 📥 Download & Install
+          
+          ### Method 1: AltStore (Recommended)
+          
+          1. Download IPA from this folder
+          2. Open AltStore on your iPhone
+          3. Tap "+" button
+          4. Select the IPA file
+          5. AltStore will automatically sign and install
+          
+          ### Method 2: Sideloadly
+          
+          1. Download IPA from this folder
+          2. Open Sideloadly on your computer
+          3. Connect iPhone via USB
+          4. Drag IPA into Sideloadly
+          5. Enter Apple ID
+          6. Click "Start"
+          
+          ## 📋 Files
+          
+          - `swiggy_altstore_ready_*.ipa` - Ready for AltStore/Sideloadly
+          - `README.md` - This file
+          
+          ## ⚠️ Important
+          
+          - IPAs are prepared but not signed (AltStore/Sideloadly will sign)
+          - Certificate expires in 7 days (auto-renewed with AltStore)
+          - Trust certificate: Settings > General > VPN & Device Management
+          
+          ## 🔄 Latest Release
+          
+          Check the most recent file in this folder for the latest build.
+          EOF
+          
+          echo "Created README.md"
+      
+      - name: Upload to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-release
+          path: |
+            releases/*.ipa
+            releases/README.md
+          retention-days: 30
+      
+      - name: Output location
+        run: |
+          echo "## IPA Release Location" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📁 **Folder:** \`releases/\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **File:** \`${{ env.output_ipa }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Download Options:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **GitHub Artifacts:** Actions → Download artifact" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Repository:** \`releases/\` folder in repo" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Full Path:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "releases/${{ env.output_ipa }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

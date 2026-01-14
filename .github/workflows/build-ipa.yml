@@ -1,0 +1,116 @@
+name: Build IPA from App Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'extracted/**'
+      - '.github/workflows/build-ipa.yml'
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Verify extracted app bundle exists
+        run: |
+          if [ ! -d "extracted" ]; then
+            echo "Error: extracted/ directory not found"
+            exit 1
+          fi
+          if [ ! -f "extracted/Info.plist" ]; then
+            echo "Error: extracted/Info.plist not found. Is this a valid app bundle?"
+            exit 1
+          fi
+          echo "✅ App bundle found"
+      
+      - name: Determine app name
+        id: app_name
+        run: |
+          # Try to get app name from Info.plist
+          if command -v plutil &> /dev/null; then
+            APP_NAME=$(plutil -extract CFBundleName raw extracted/Info.plist 2>/dev/null || echo "Swiggy")
+          else
+            APP_NAME="Swiggy"
+          fi
+          # Ensure .app extension
+          if [[ ! "$APP_NAME" == *.app ]]; then
+            APP_NAME="${APP_NAME}.app"
+          fi
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "📱 App name: $APP_NAME"
+      
+      - name: Create Payload directory structure
+        run: |
+          mkdir -p Payload
+          # Copy extracted app bundle to Payload with proper name
+          cp -R extracted "Payload/${{ steps.app_name.outputs.app_name }}"
+          echo "✅ Payload structure created"
+      
+      - name: Create IPA file
+        run: |
+          # Create IPA using zip
+          IPA_NAME="swiggy_device_rotator_$(date +%Y%m%d_%H%M%S).ipa"
+          zip -r "$IPA_NAME" Payload/ -x "*.DS_Store" "*/.*"
+          echo "ipa_file=$IPA_NAME" >> $GITHUB_ENV
+          echo "✅ IPA created: $IPA_NAME"
+          ls -lh "$IPA_NAME"
+      
+      - name: Verify IPA structure
+        run: |
+          unzip -l "${{ env.ipa_file }}" | head -20
+          echo "✅ IPA structure verified"
+      
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swiggy-device-rotator-ipa
+          path: ${{ env.ipa_file }}
+          retention-days: 30
+      
+      - name: Create release info
+        run: |
+          echo "# IPA Build Information" > BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "**Build Date:** $(date)" >> BUILD_INFO.md
+          echo "**IPA File:** ${{ env.ipa_file }}" >> BUILD_INFO.md
+          echo "**App Name:** ${{ steps.app_name.outputs.app_name }}" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "## Installation" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "⚠️ **Important:** This IPA must be signed before installation." >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "### Signing the IPA:" >> BUILD_INFO.md
+          echo "\`\`\`bash" >> BUILD_INFO.md
+          echo "# Extract IPA" >> BUILD_INFO.md
+          echo "unzip ${{ env.ipa_file }} -d temp_sign" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "# Sign the app bundle" >> BUILD_INFO.md
+          echo "codesign --force --sign \"YOUR_CERTIFICATE\" --entitlements extracted/swiggy.entitlements \"temp_sign/Payload/${{ steps.app_name.outputs.app_name }}\"" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "# Repackage" >> BUILD_INFO.md
+          echo "cd temp_sign && zip -r ../signed_${{ env.ipa_file }} Payload/" >> BUILD_INFO.md
+          echo "\`\`\`" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "## Features" >> BUILD_INFO.md
+          echo "" >> BUILD_INFO.md
+          echo "- ✅ Device ID rotation with button interface" >> BUILD_INFO.md
+          echo "- ✅ JavaScript injection for web views" >> BUILD_INFO.md
+          echo "- ✅ Native iOS UI for device ID management" >> BUILD_INFO.md
+      
+      - name: Upload build info
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: BUILD_INFO.md
+          retention-days: 30

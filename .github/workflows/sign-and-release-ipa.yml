@@ -1,0 +1,257 @@
+name: Sign and Release IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_file:
+        description: 'IPA file to sign (relative to repo root)'
+        required: true
+        default: 'swiggy_with_reset_button.ipa'
+      certificate_name:
+        description: 'Code signing certificate name'
+        required: false
+        default: ''
+      use_altstore:
+        description: 'Prepare for AltStore (no signing needed)'
+        type: boolean
+        default: true
+  push:
+    branches:
+      - main
+    paths:
+      - '*.ipa'
+      - '.github/workflows/sign-and-release-ipa.yml'
+
+jobs:
+  sign-and-release:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      
+      - name: Determine IPA file
+        id: ipa_file
+        run: |
+          IPA_FILE="${{ github.event.inputs.ipa_file || 'swiggy_with_reset_button.ipa' }}"
+          if [ ! -f "$IPA_FILE" ]; then
+            # Try to find any IPA file
+            IPA_FILE=$(find . -name "*.ipa" -type f | head -1)
+            if [ -z "$IPA_FILE" ]; then
+              echo "Error: No IPA file found"
+              exit 1
+            fi
+          fi
+          echo "ipa_path=$IPA_FILE" >> $GITHUB_OUTPUT
+          echo "ipa_name=$(basename "$IPA_FILE")" >> $GITHUB_OUTPUT
+          echo "Found IPA: $IPA_FILE"
+      
+      - name: Create releases directory
+        run: |
+          mkdir -p releases
+          echo "Releases directory created"
+      
+      - name: List available certificates
+        if: github.event.inputs.use_altstore != 'true'
+        run: |
+          echo "Available certificates:"
+          security find-identity -v -p codesigning | grep ")" | head -10 || echo "No certificates found"
+      
+      - name: Sign IPA with certificate
+        if: github.event.inputs.certificate_name != '' && github.event.inputs.use_altstore != 'true'
+        run: |
+          IPA_FILE="${{ steps.ipa_file.outputs.ipa_path }}"
+          CERT_NAME="${{ github.event.inputs.certificate_name }}"
+          OUTPUT_IPA="releases/swiggy_signed_$(date +%Y%m%d_%H%M%S).ipa"
+          
+          echo "Signing IPA: $IPA_FILE"
+          echo "Certificate: $CERT_NAME"
+          
+          # Extract IPA
+          TEMP_DIR="temp_sign_$$"
+          mkdir -p "$TEMP_DIR"
+          unzip -q "$IPA_FILE" -d "$TEMP_DIR"
+          
+          # Find app bundle
+          APP_BUNDLE=$(find "$TEMP_DIR" -name "*.app" -type d | head -1)
+          
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "Error: Could not find .app bundle"
+            exit 1
+          fi
+          
+          echo "Found app bundle: $(basename "$APP_BUNDLE")"
+          
+          # Remove old signatures
+          find "$APP_BUNDLE" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "$APP_BUNDLE" -name "*.mobileprovision" -delete 2>/dev/null || true
+          
+          # Sign frameworks
+          if [ -d "$APP_BUNDLE/Frameworks" ]; then
+            for framework in "$APP_BUNDLE/Frameworks"/*.framework; do
+              if [ -d "$framework" ]; then
+                echo "Signing framework: $(basename "$framework")"
+                codesign --force --sign "$CERT_NAME" "$framework" 2>/dev/null || true
+              fi
+            done
+          fi
+          
+          # Sign plugins
+          if [ -d "$APP_BUNDLE/PlugIns" ]; then
+            for plugin in "$APP_BUNDLE/PlugIns"/*.appex; do
+              if [ -d "$plugin" ]; then
+                echo "Signing plugin: $(basename "$plugin")"
+                codesign --force --sign "$CERT_NAME" "$plugin" 2>/dev/null || true
+              fi
+            done
+          fi
+          
+          # Sign main app
+          ENTITLEMENTS="extracted/swiggy.entitlements"
+          if [ -f "$ENTITLEMENTS" ]; then
+            codesign --force --sign "$CERT_NAME" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+          else
+            codesign --force --sign "$CERT_NAME" "$APP_BUNDLE"
+          fi
+          
+          # Verify
+          codesign -vv --deep --strict "$APP_BUNDLE" && echo "Signature verified!" || echo "Warning: Signature verification failed"
+          
+          # Repackage
+          cd "$TEMP_DIR"
+          zip -q -r "../$OUTPUT_IPA" Payload/
+          cd ..
+          
+          rm -rf "$TEMP_DIR"
+          
+          echo "signed_ipa=$OUTPUT_IPA" >> $GITHUB_ENV
+          echo "Signed IPA: $OUTPUT_IPA"
+      
+      - name: Prepare IPA for AltStore/Sideloadly
+        if: github.event.inputs.use_altstore == 'true' || github.event.inputs.certificate_name == ''
+        run: |
+          IPA_FILE="${{ steps.ipa_file.outputs.ipa_path }}"
+          OUTPUT_IPA="releases/swiggy_prepared_$(date +%Y%m%d_%H%M%S).ipa"
+          
+          echo "Preparing IPA for AltStore/Sideloadly: $IPA_FILE"
+          
+          # Extract IPA
+          TEMP_DIR="temp_prep_$$"
+          mkdir -p "$TEMP_DIR"
+          unzip -q "$IPA_FILE" -d "$TEMP_DIR"
+          
+          # Find app bundle
+          APP_BUNDLE=$(find "$TEMP_DIR" -name "*.app" -type d | head -1)
+          
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "Error: Could not find .app bundle"
+            exit 1
+          fi
+          
+          # Remove old signatures (AltStore/Sideloadly will sign)
+          find "$APP_BUNDLE" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "$APP_BUNDLE" -name "*.mobileprovision" -delete 2>/dev/null || true
+          
+          # Repackage
+          cd "$TEMP_DIR"
+          zip -q -r "../$OUTPUT_IPA" Payload/
+          cd ..
+          
+          rm -rf "$TEMP_DIR"
+          
+          echo "prepared_ipa=$OUTPUT_IPA" >> $GITHUB_ENV
+          echo "Prepared IPA: $OUTPUT_IPA"
+      
+      - name: Create release info
+        run: |
+          cat > releases/RELEASE_INFO.md << EOF
+          # IPA Release Information
+          
+          **Build Date:** $(date)
+          **Workflow Run:** ${{ github.run_number }}
+          **Commit:** ${{ github.sha }}
+          **Branch:** ${{ github.ref_name }}
+          
+          ## Files
+          
+          EOF
+          
+          if [ -n "${{ env.signed_ipa }}" ]; then
+            echo "**Signed IPA:** \`${{ env.signed_ipa }}\`" >> releases/RELEASE_INFO.md
+            echo "" >> releases/RELEASE_INFO.md
+            echo "This IPA is signed and ready to install." >> releases/RELEASE_INFO.md
+          elif [ -n "${{ env.prepared_ipa }}" ]; then
+            echo "**Prepared IPA:** \`${{ env.prepared_ipa }}\`" >> releases/RELEASE_INFO.md
+            echo "" >> releases/RELEASE_INFO.md
+            echo "This IPA is prepared for AltStore/Sideloadly signing." >> releases/RELEASE_INFO.md
+            echo "" >> releases/RELEASE_INFO.md
+            echo "### Installation Steps:" >> releases/RELEASE_INFO.md
+            echo "" >> releases/RELEASE_INFO.md
+            echo "1. Download the IPA from releases folder" >> releases/RELEASE_INFO.md
+            echo "2. Use AltStore or Sideloadly to sign and install" >> releases/RELEASE_INFO.md
+            echo "3. Trust the certificate on your device" >> releases/RELEASE_INFO.md
+          fi
+          
+          echo "" >> releases/RELEASE_INFO.md
+          echo "## Location" >> releases/RELEASE_INFO.md
+          echo "" >> releases/RELEASE_INFO.md
+          echo "All release files are stored in: \`releases/\` directory" >> releases/RELEASE_INFO.md
+          echo "" >> releases/RELEASE_INFO.md
+          echo "## Download" >> releases/RELEASE_INFO.md
+          echo "" >> releases/RELEASE_INFO.md
+          echo "Download from GitHub Actions artifacts or releases folder in repository." >> releases/RELEASE_INFO.md
+          
+          cat releases/RELEASE_INFO.md
+      
+      - name: Upload IPA to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-ipa-release
+          path: |
+            releases/*.ipa
+            releases/RELEASE_INFO.md
+          retention-days: 30
+          if-no-files-found: error
+      
+      - name: Create release summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### IPA Files Location" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📁 **All IPAs stored in:** \`releases/\` folder" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ env.signed_ipa }}" ]; then
+            echo "✅ **Signed IPA:** \`${{ env.signed_ipa }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This IPA is signed and ready to install on your device." >> $GITHUB_STEP_SUMMARY
+          elif [ -n "${{ env.prepared_ipa }}" ]; then
+            echo "📦 **Prepared IPA:** \`${{ env.prepared_ipa }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This IPA is prepared for AltStore/Sideloadly signing." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Download the IPA from artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "2. Use AltStore or Sideloadly to sign and install" >> $GITHUB_STEP_SUMMARY
+            echo "3. Trust certificate: Settings > General > VPN & Device Management" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Download Location" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifacts:** Check Actions tab → Download artifact" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** \`releases/\` folder in repository root" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Commit releases to repository
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add releases/
+          git commit -m "Add signed IPA release [skip ci]" || echo "No changes to commit"
+          git push origin HEAD:${{ github.ref }} || echo "Push failed or no changes"

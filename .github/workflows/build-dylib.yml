@@ -1,0 +1,168 @@
+name: Build DeviceIDRotator Dylib
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'DeviceIDRotatorDylib/**'
+      - '.github/workflows/build-dylib.yml'
+  pull_request:
+    paths:
+      - 'DeviceIDRotatorDylib/**'
+
+jobs:
+  build-dylib:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      
+      - name: Verify iOS SDK
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "📱 iOS SDK Path: $SDK_PATH"
+          if [ -z "$SDK_PATH" ]; then
+            echo "❌ Error: iOS SDK not found"
+            exit 1
+          fi
+      
+      - name: Check dylib source files
+        run: |
+          cd DeviceIDRotatorDylib
+          if [ ! -f "DeviceIDRotator.m" ]; then
+            echo "❌ Error: DeviceIDRotator.m not found"
+            exit 1
+          fi
+          echo "✅ Source files found"
+          ls -la *.m *.h 2>/dev/null || true
+      
+      - name: Make build script executable
+        run: |
+          cd DeviceIDRotatorDylib
+          chmod +x build_dylib.sh || true
+      
+      - name: Build dylib
+        run: |
+          cd DeviceIDRotatorDylib
+          echo "🔨 Building DeviceIDRotator.dylib..."
+          
+          # Get iOS SDK path
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          
+          # Clean previous build
+          rm -f DeviceIDRotator.dylib
+          
+          # Build dylib
+          clang -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -framework UIKit \
+            -framework Foundation \
+            -dynamiclib \
+            -fobjc-arc \
+            -install_name @rpath/DeviceIDRotator.dylib \
+            -compatibility_version 1.0 \
+            -current_version 1.0 \
+            -o DeviceIDRotator.dylib \
+            DeviceIDRotator.m
+          
+          if [ ! -f "DeviceIDRotator.dylib" ]; then
+            echo "❌ Build failed!"
+            exit 1
+          fi
+          
+          echo "✅ Build successful!"
+      
+      - name: Verify dylib
+        run: |
+          cd DeviceIDRotatorDylib
+          echo "📋 Dylib Info:"
+          ls -lh DeviceIDRotator.dylib
+          
+          echo ""
+          echo "📋 Dylib Architecture:"
+          file DeviceIDRotator.dylib
+          
+          echo ""
+          echo "📋 Dylib Dependencies:"
+          otool -L DeviceIDRotator.dylib | head -10
+          
+          echo ""
+          echo "📋 Exported Symbols:"
+          nm -gU DeviceIDRotator.dylib | grep -E "(rotateDeviceID|getCurrentDeviceID|init)" || echo "Checking symbols..."
+          nm -gU DeviceIDRotator.dylib | head -20
+      
+      - name: Create build info
+        run: |
+          cd DeviceIDRotatorDylib
+          cat > BUILD_INFO.md << EOF
+          # DeviceIDRotator Dylib Build Information
+          
+          **Build Date:** $(date)
+          **Build System:** GitHub Actions
+          **Runner:** macos-latest
+          **Xcode Version:** $(xcodebuild -version | head -1)
+          **iOS SDK:** $(xcrun --sdk iphoneos --show-sdk-version)
+          
+          ## File Information
+          
+          **Dylib:** DeviceIDRotator.dylib
+          **Size:** $(ls -lh DeviceIDRotator.dylib | awk '{print $5}')
+          **Architecture:** arm64
+          
+          ## Usage
+          
+          1. Download the dylib from artifacts
+          2. Inject into IPA using inject_dylib.py or manually
+          3. Sign the IPA before installation
+          
+          ## Injection
+          
+          \`\`\`bash
+          python inject_dylib.py swiggy.ipa DeviceIDRotator.dylib swiggy_patched.ipa
+          \`\`\`
+          
+          Or manually:
+          1. Extract IPA
+          2. Copy dylib to Payload/Swiggy.app/Frameworks/
+          3. Use insert_dylib or optool to inject
+          4. Repackage IPA
+          EOF
+          cat BUILD_INFO.md
+      
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deviceidrotator-dylib
+          path: |
+            DeviceIDRotatorDylib/DeviceIDRotator.dylib
+            DeviceIDRotatorDylib/DeviceIDRotator.h
+          retention-days: 30
+          if-no-files-found: error
+      
+      - name: Upload build info
+        uses: actions/upload-artifact@v4
+        with:
+          name: dylib-build-info
+          path: DeviceIDRotatorDylib/BUILD_INFO.md
+          retention-days: 30
+      
+      - name: Upload source files (for reference)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dylib-source
+          path: |
+            DeviceIDRotatorDylib/*.m
+            DeviceIDRotatorDylib/*.h
+            DeviceIDRotatorDylib/*.sh
+            DeviceIDRotatorDylib/*.py
+            DeviceIDRotatorDylib/Makefile
+          retention-days: 7
+          if-no-files-found: warn
